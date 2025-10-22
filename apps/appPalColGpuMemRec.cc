@@ -27,6 +27,7 @@
 #include "cxxopts/cxxopts.hpp"
 #include "ClqPart/utility.h"
 #include "ClqPart/greedyColor.h"
+#include "ECLgraph.h"
 
 void printStat( int level, PalColStat &palStat) {
   
@@ -46,11 +47,19 @@ void printStat( int level, PalColStat &palStat) {
 
 }
 
+static bool hasExt(const std::string &path, const std::string &ext) {
+  auto p = path.find_last_of('.');
+  if (p == std::string::npos) return false;
+  std::string got = path.substr(p + 1);
+  for (auto &c : got) c = std::tolower(c);
+  return got == ext;
+}
+
 int main(int argC, char *argV[]) {
   
-  cxxopts::Options options("palColGr", "read json pauli string files and color the graph using palette coloring algorithm (GPU-accelerated vesion)"); 
+  cxxopts::Options options("palColGr", "GPU-accelerated palette coloring for JSON (.json) or ECL CSR (.egr) inputs"); 
   options.add_options()
-    ("in,infile", "json file containing the pauli strings", cxxopts::value<std::string>())
+    ("in,infile", "input file: JSON Pauli strings (.json) or ECL graph (.egr)", cxxopts::value<std::string>())
     ("out,outfile", "json file containing the groups after coloring", cxxopts::value<std::string>()->default_value(""))
     ("t,target", "palette size. Two choices: 1) absolute number (>=1), 2) percentage(0-1) of nodes", cxxopts::value<double>())
     ("a,alpha", "coefficient to log(n) for list size", cxxopts::value<float>()->default_value("1.0"))
@@ -92,8 +101,17 @@ int main(int argC, char *argV[]) {
     exit(1);
   }
 
-  ClqPart::JsonGraph jsongraph(inFname, false, true); 
-  NODE_T n = jsongraph.numOfData();
+  const bool useEgr = hasExt(inFname, "egr");
+  NODE_T n = 0;
+  ECLgraph egr;
+  if (useEgr) {
+    egr = readECLgraph(inFname.c_str());
+    n = static_cast<NODE_T>(egr.nodes);
+  } else {
+    ClqPart::JsonGraph jsongraph(inFname, false, true);
+    n = jsongraph.numOfData();
+    // keep jsongraph in JSON branch below
+  }
   
   double nextFrac;
   if(target1 < 1) {
@@ -107,6 +125,119 @@ int main(int argC, char *argV[]) {
   }
   if(list_size >=0)
     std::cout<<"Since list size is given, ignoring alpha"<<std::endl;
+
+  // ECL .egr path: stream edges to build conflict graph, then color
+  if (useEgr) {
+    bool Edge32Bit = n < (1 << 16);
+    if(Edge32Bit){
+      std::cout << "Using 32-bit offsets" << std::endl;
+      PaletteColor<unsigned int> palcol(n,target,alpha,list_size,seed);
+      int level = 0;
+      double t1 = 0.0;
+      // Build conflict graph on GPU from ECL CSR
+      palcol.buildConfGraphGpuFromCSR(egr.nindex, egr.nlist, egr.nodes, egr.edges);
+      // Compute undirected edge count for stats
+      EDGE_T m_in = 0;
+      for (int u = 0; u < egr.nodes; u++) {
+        for (int ei = egr.nindex[u]; ei < egr.nindex[u+1]; ++ei) {
+          int v = egr.nlist[ei];
+          if (u < v) { m_in++; }
+        }
+      }
+      PalColStat palStat = palcol.getPalStat(level);
+      palStat.m = m_in;
+      if(orderName == "RANDOM") palcol.confColorRandCSR();
+      else palcol.confColorGreedyCSR();
+      palStat.nColors = palcol.getNumColors();
+      printStat(level, palStat);
+      std::vector<NODE_T> invVert = palcol.getInvVertices();
+      if (isRec == true) {
+        std::vector<char> keep(n, 0);
+        while(invVert.size() > nInv) {
+          level++;
+          palcol.reInit(invVert, invVert.size()*nextFrac, alpha);
+          std::fill(keep.begin(), keep.end(), 0);
+          for (NODE_T v : invVert) keep[v] = 1;
+          t1 = omp_get_wtime();
+          m_in = 0;
+          for (int u = 0; u < egr.nodes; u++) {
+            if (!keep[u]) continue;
+            for (int ei = egr.nindex[u]; ei < egr.nindex[u+1]; ++ei) {
+              int v = egr.nlist[ei];
+              if (u < v && keep[v]) { palcol.buildStreamConfGraph(u, v); m_in++; }
+            }
+          }
+          PalColStat st = palcol.getPalStat(level);
+          st.confBuildTime = omp_get_wtime() - t1;
+          st.m = m_in;
+          if(orderName == "RANDOM") palcol.confColorRand(invVert);
+          else palcol.confColorGreedy(invVert);
+          st.nColors = palcol.getNumColors();
+          printStat(level, st);
+          invVert = palcol.getInvVertices();
+        }
+      }
+      if(!invVert.empty()) {
+        std::cout << "Final Num invalid Vert: " << invVert.size() << "\n";
+      }
+      std::cout<<"# of Final colors: " <<palcol.getNumColors()<<std::endl;
+    } else {
+      std::cout << "Using 64-bit offsets" << std::endl;
+      PaletteColor<unsigned long long> palcol(n,target,alpha,list_size,seed);
+      int level = 0;
+      double t1 = 0.0;
+      palcol.buildConfGraphGpuFromCSR(egr.nindex, egr.nlist, egr.nodes, egr.edges);
+      EDGE_T m_in = 0;
+      for (int u = 0; u < egr.nodes; u++) {
+        for (int ei = egr.nindex[u]; ei < egr.nindex[u+1]; ++ei) {
+          int v = egr.nlist[ei];
+          if (u < v) { m_in++; }
+        }
+      }
+      PalColStat palStat = palcol.getPalStat(level);
+      palStat.m = m_in;
+      if(orderName == "RANDOM") palcol.confColorRandCSR();
+      else palcol.confColorGreedyCSR();
+      palStat.nColors = palcol.getNumColors();
+      printStat(level, palStat);
+      std::vector<NODE_T> invVert = palcol.getInvVertices();
+      if (isRec == true) {
+        std::vector<char> keep(n, 0);
+        while(invVert.size() > nInv) {
+          level++;
+          palcol.reInit(invVert, invVert.size()*nextFrac, alpha);
+          std::fill(keep.begin(), keep.end(), 0);
+          for (NODE_T v : invVert) keep[v] = 1;
+          t1 = omp_get_wtime();
+          m_in = 0;
+          for (int u = 0; u < egr.nodes; u++) {
+            if (!keep[u]) continue;
+            for (int ei = egr.nindex[u]; ei < egr.nindex[u+1]; ++ei) {
+              int v = egr.nlist[ei];
+              if (u < v && keep[v]) { palcol.buildStreamConfGraph(u, v); m_in++; }
+            }
+          }
+          PalColStat st = palcol.getPalStat(level);
+          st.confBuildTime = omp_get_wtime() - t1;
+          st.m = m_in;
+          if(orderName == "RANDOM") palcol.confColorRand(invVert);
+          else palcol.confColorGreedy(invVert);
+          st.nColors = palcol.getNumColors();
+          printStat(level, st);
+          invVert = palcol.getInvVertices();
+        }
+      }
+      if(!invVert.empty()) {
+        std::cout << "Final Num invalid Vert: " << invVert.size() << "\n";
+      }
+      std::cout<<"# of Final colors: " <<palcol.getNumColors()<<std::endl;
+    }
+    freeECLgraph(egr);
+    return 0;
+  }
+
+  // JSON (Pauli) path remains unchanged
+  ClqPart::JsonGraph jsongraph(inFname, false, true); 
   bool Edge32Bit = n < (1 << 16);
   if(Edge32Bit){
     std::cout << "Using 32-bit offsets" << std::endl;

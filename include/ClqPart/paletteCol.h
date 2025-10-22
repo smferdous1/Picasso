@@ -356,6 +356,62 @@ void buildConfGraphGpuMemConscious (ClqPart::JsonGraph &jsongraph) {
   #endif // COMPLEMENT_GRAPH
 }
 
+// Build conflict graph on GPU from an input CSR (ECL) graph.
+// rowPtr has size n+1; colIdx has size numAdj (total adjacency entries).
+void buildConfGraphGpuFromCSR(const int *rowPtr, const int *colIdx, int nVertices, int numAdj) {
+  double t1 = omp_get_wtime();
+  // Upload input CSR to device
+  int *d_rowPtr = nullptr; int *d_colIdx = nullptr;
+  ERR_CHK(cudaMalloc(&d_rowPtr, (nVertices + 1) * sizeof(int)));
+  ERR_CHK(cudaMemcpy(d_rowPtr, rowPtr, (nVertices + 1) * sizeof(int), cudaMemcpyHostToDevice));
+  ERR_CHK(cudaMalloc(&d_colIdx, numAdj * sizeof(int)));
+  ERR_CHK(cudaMemcpy(d_colIdx, colIdx, numAdj * sizeof(int), cudaMemcpyHostToDevice));
+
+  // Allocate offsets and COO buffer on device
+  h_confOffsets.resize(n + 1);
+  ERR_CHK(cudaMalloc(&d_confOffsets, h_confOffsets.size() * sizeof(OffsetTy)));
+  ERR_CHK(cudaMemset(d_confOffsets, 0, h_confOffsets.size() * sizeof(OffsetTy)));
+  // Allocate max possible COO edges buffer (worst-case: every input edge conflicts)
+  ERR_CHK(cudaMalloc(&d_confVertices, (size_t)numAdj * sizeof(Edge)));
+
+  // Count edges
+  OffsetTy *d_nConflicts = nullptr;
+  ERR_CHK(cudaMalloc(&d_nConflicts, sizeof(OffsetTy)));
+  ERR_CHK(cudaMemset(d_nConflicts, 0, sizeof(OffsetTy)));
+
+  buildCooConfGraphFromCSRDevice(d_rowPtr, d_colIdx, (NODE_T)n, d_colList, (NODE_T)T, d_confOffsets, d_confVertices, d_nConflicts);
+  ERR_CHK(cudaDeviceSynchronize());
+  ERR_CHK(cudaMemcpy(&nConflicts, d_nConflicts, sizeof(OffsetTy), cudaMemcpyDeviceToHost));
+
+  // Prepare CSR of conflict graph
+  h_confVertices.resize((size_t)nConflicts * 2);
+  OffsetTy *d_confOffsetsCnt = cubExclusiveSum((NODE_T)n, d_confOffsets);
+  cudaDeviceSynchronize();
+  NODE_T *d_confCsr = nullptr;
+  ERR_CHK(cudaMalloc(&d_confCsr, h_confVertices.size() * sizeof(NODE_T)));
+  buildCsrConfGraphDevice((NODE_T)n, d_confOffsets, d_confOffsetsCnt, d_confVertices, d_confCsr, nConflicts);
+  ERR_CHK(cudaDeviceSynchronize());
+
+  // Copy CSR back
+  ERR_CHK(cudaMemcpy(h_confOffsets.data(), d_confOffsets, h_confOffsets.size() * sizeof(OffsetTy), cudaMemcpyDeviceToHost));
+  ERR_CHK(cudaMemcpy(h_confVertices.data(), d_confCsr, h_confVertices.size() * sizeof(NODE_T), cudaMemcpyDeviceToHost));
+
+  // Cleanup temps
+  ERR_CHK(cudaFree(d_confOffsetsCnt));
+  ERR_CHK(cudaFree(d_confCsr));
+  ERR_CHK(cudaFree(d_rowPtr));
+  ERR_CHK(cudaFree(d_colIdx));
+  ERR_CHK(cudaFree(d_nConflicts));
+
+  // Sort adjacency lists on host
+  #pragma omp parallel for
+  for (NODE_T i = 0; i < n; i++) {
+    std::sort(h_confVertices.begin() + h_confOffsets[i], h_confVertices.begin() + h_confOffsets[i + 1]);
+  }
+  palStat[level].confBuildTime = omp_get_wtime() - t1;
+  palStat[level].mConf = nConflicts;
+}
+
 void buildConfGraphGpuMemConscious (ClqPart::JsonGraph &jsongraph, std::vector<NODE_T> &nodeList) {
 
   double t1 = omp_get_wtime();
@@ -523,7 +579,7 @@ void buildConfGraphGpu (ClqPart::JsonGraph &jsongraph) {
   std::cout << "variance: " << variance << std::endl;
   // Exit
   exit(0);
-  #endif // COMPLEMENT_GRAPH
+#endif // COMPLEMENT_GRAPH
 }
 
 void confColorGreedyCSR() {

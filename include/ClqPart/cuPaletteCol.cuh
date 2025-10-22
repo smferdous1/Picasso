@@ -38,3 +38,15 @@ void buildCsrConfGraphDevice(const NODE_T, const OffsetTy *, OffsetTy *, const N
 
 template <typename OffsetTy>
 OffsetTy *cubExclusiveSum(const NODE_T, OffsetTy *);
+
+// Build COO conflict graph from an input CSR graph (ECL format) on GPU.
+template <typename OffsetTy>
+void buildCooConfGraphFromCSRDevice(
+        const int *d_rowPtr,
+        const int *d_colIdx,
+        const NODE_T n_vertices,
+        const NODE_T *d_colList,
+        const NODE_T n_colors,
+        OffsetTy *d_confOffsets,
+        NODE_T *d_confAdjList,
+        OffsetTy *d_nConflicts);

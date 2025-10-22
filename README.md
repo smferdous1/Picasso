@@ -51,6 +51,7 @@ A sample dataset is included in JSON format under `data/pauli_ket_ccsd_data`. Th
 Two primary executables are provided:
 - **CPU-only version**: `build/apps/palcolEr` (source: `apps/appPalColEncRecDir.cc`)
 - **GPU-accelerated version**: `build/apps/palcolGr` (source: `apps/appPalColGpuMemRec.cc`)
+- (Additional helper) `build/apps/palcolEcl` to test `.egr` on CPU directly.
 
 Use the `-h` option with either executable to view available parameters and usage instructions.
 
@@ -122,6 +123,23 @@ Final Num invalid Vert: 23
 Naive Color TIme: 8.92766e-06
 # of Final colors: 26
 ```
+
+### ECLgraph (.egr) Support (CPU and GPU)
+
+Picasso now accepts [ECL CSR graphs](https://userweb.cs.txstate.edu/~mb92/research/ECLgraph/index.html) via `include/ECLgraph.h`:
+- CPU: `palcolEcl` reads `.egr` and runs the palette pipeline on CPU.
+- GPU: `palcolGr` can also take `.egr`. It builds the conflict graph on GPU from the input CSR, then colors on CPU (timed separately).
+
+Run on an ECL graph (sample files under `ecl_graph/`):
+```bash
+./build/apps/palcolGr --in ecl_graph/facebook.egr -t 15
+```
+You will see separate timings:
+- Assign Time: list-color assignment (and device setup)
+- Conf. Build Time: GPU build of the conflict graph from CSR (.egr)
+- Conf. Color Time: CPU coloring on the conflict graph
+
+Note: For `.egr` inputs, only conflict-graph construction is GPU-accelerated at present; coloring runs on CPU.
 
 **Example 4:** Large GPU execution
 

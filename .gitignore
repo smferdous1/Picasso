@@ -47,3 +47,6 @@ experimentations/
 .DS_Store
 data
 #pauli_ket_ccsd_data
+
+# Agent
+AGENTS.md

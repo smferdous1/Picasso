@@ -32,6 +32,11 @@ target_include_directories(palcol PUBLIC "${PROJECT_SOURCE_DIR}/include")
 target_link_libraries(palcol PUBLIC ClqPart)
 target_compile_options(palcol PRIVATE -O3 )
 
+add_executable(palcolEcl appPaletteColorECL.cc)
+target_include_directories(palcolEcl PUBLIC "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(palcolEcl PUBLIC ClqPart)
+target_compile_options(palcolEcl PRIVATE -O3 )
+
 add_executable(palcolS appPalColDir.cc)
 target_include_directories(palcolS PUBLIC "${PROJECT_SOURCE_DIR}/include") 
 target_link_libraries(palcolS PUBLIC ClqPart)

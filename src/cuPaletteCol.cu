@@ -241,6 +241,40 @@ __global__ void build_csr_conflict_graph_kernel(
     }
 }
 
+// Build COO conflict graph from an input ECL CSR graph. For each CSR edge (u,v),
+// if u < v and the two vertices share at least one candidate color in d_colList,
+// emit an undirected conflict edge (u,v) and increment per-vertex degrees.
+template <typename OffsetTy>
+__global__ void build_coo_conflict_graph_from_csr_kernel(
+        const int *__restrict__ d_rowPtr,
+        const int *__restrict__ d_colIdx,
+        const NODE_T n_vertices,
+        const NODE_T *__restrict__ d_colList,
+        const NODE_T n_colors,
+        OffsetTy *__restrict__ d_confOffsets,
+        NODE_T *__restrict__ d_confAdjList,
+        OffsetTy *__restrict__ d_nConflicts) {
+    Edge *d_cooEdgeList = (Edge *)d_confAdjList;
+    for (NODE_T u = blockIdx.x * blockDim.x + threadIdx.x; u < n_vertices; u += blockDim.x * gridDim.x) {
+        const int beg = d_rowPtr[u];
+        const int end = d_rowPtr[u + 1];
+        const NODE_T *colListU = &d_colList[u * n_colors];
+        for (int ei = beg; ei < end; ++ei) {
+            NODE_T v = d_colIdx[ei];
+            if (u < v) {
+                const NODE_T *colListV = &d_colList[v * n_colors];
+                bool common = findFirstCommonElement(colListU, colListV, n_colors);
+                if (common) {
+                    OffsetTy idx = atomicAdd(d_nConflicts, (OffsetTy)1);
+                    atomicAdd(&d_confOffsets[u], (OffsetTy)1);
+                    atomicAdd(&d_confOffsets[v], (OffsetTy)1);
+                    d_cooEdgeList[idx] = Edge{u, v};
+                }
+            }
+        }
+    }
+}
+
 void buildCompGraphDevice(
         const uint32_t *d_pauliEnc,
         const int pauliEncSize,
@@ -372,6 +406,29 @@ void buildCsrConfGraphDevice(
 }
 
 template <typename OffsetTy>
+void buildCooConfGraphFromCSRDevice(
+        const int *d_rowPtr,
+        const int *d_colIdx,
+        const NODE_T n_vertices,
+        const NODE_T *d_colList,
+        const NODE_T n_colors,
+        OffsetTy *d_confOffsets,
+        NODE_T *d_confAdjList,
+        OffsetTy *d_nConflicts){
+    int device;
+    cudaDeviceProp prop;
+    cudaGetDevice(&device);
+    cudaGetDeviceProperties(&prop, device);
+    int nSM = prop.multiProcessorCount;
+    int maxThreadsPerSM = prop.maxThreadsPerMultiProcessor;
+    int block_size = 256;
+    int num_blocks = nSM * (maxThreadsPerSM / block_size);
+    build_coo_conflict_graph_from_csr_kernel<<<num_blocks, block_size>>>(
+        d_rowPtr, d_colIdx, n_vertices, d_colList, n_colors,
+        d_confOffsets, d_confAdjList, d_nConflicts);
+}
+
+template <typename OffsetTy>
 __host__ OffsetTy *cubExclusiveSum(const NODE_T n, OffsetTy *d_confOffsets){
     int num_elements = n + 1;
     size_t num_bytes = num_elements * sizeof(OffsetTy);
@@ -404,3 +461,6 @@ template void buildCsrConfGraphDevice(const NODE_T, const NODE_T *, NODE_T *, co
 template unsigned int * cubExclusiveSum(const NODE_T, unsigned int *);
 template unsigned long long * cubExclusiveSum(const NODE_T, unsigned long long *);
 template NODE_T * cubExclusiveSum(const NODE_T, NODE_T *);
+template void buildCooConfGraphFromCSRDevice(const int *, const int *, const NODE_T, const NODE_T *, const NODE_T, unsigned int *, NODE_T *, unsigned int *);
+template void buildCooConfGraphFromCSRDevice(const int *, const int *, const NODE_T, const NODE_T *, const NODE_T, unsigned long long *, NODE_T *, unsigned long long *);
+template void buildCooConfGraphFromCSRDevice(const int *, const int *, const NODE_T, const NODE_T *, const NODE_T, NODE_T *, NODE_T *, NODE_T *);
